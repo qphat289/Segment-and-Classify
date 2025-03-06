@@ -106,49 +106,75 @@ class SegmentationMetrics:
     def dice_coef_metric(self, pred, label, ignore_background=True):
         """
         Calculate Dice coefficient with option to ignore background
+        Using the same calculation method as dice_loss_ignore_background
         
         Args:
             pred: [B, C, H, W] - prediction logits
             label: [B, H, W] - ground truth labels
             ignore_background: if True, background class is excluded from average
         """
-        pred = torch.softmax(pred, dim=1)
-        label_one_hot = torch.zeros_like(pred)
-        label_one_hot.scatter_(1, label.unsqueeze(1), 1)
+        # Convert to probabilities
+        pred_softmax = torch.softmax(pred, dim=1)
+        
+        # One-hot encode target
+        target_one_hot = torch.zeros_like(pred_softmax)
+        target_one_hot.scatter_(1, label.unsqueeze(1), 1)
         
         batch_size, num_classes = pred.shape[0], pred.shape[1]
         
-        # Calculate Dice for each class and each sample in batch
-        intersection = (pred * label_one_hot).sum(dim=(2, 3))
-        denominator = pred.sum(dim=(2, 3)) + label_one_hot.sum(dim=(2, 3))
-        dice_per_class = (2. * intersection + self.smooth) / (denominator + self.smooth)
-        
         if ignore_background:
-            # Exclude background class (assumed to be index 0)
-            # Only average over tumor classes (indices 1, 2, 3)
-            dice_per_class = dice_per_class[:, 1:]
-            
-            # Only include classes that actually appear in the ground truth
-            # to avoid division by zero or meaningless metrics
-            valid_mask = label_one_hot[:, 1:].sum(dim=(2, 3)) > 0
-            
-            # Calculate mean only over valid classes
-            dice_valid = dice_per_class * valid_mask.float()
-            dice_mean = dice_valid.sum() / (valid_mask.sum() + 1e-6)
-            
-            # Also calculate per-class average for reporting
+            # Initialize variables for tracking
+            dice_sum = 0.0
+            num_fg_classes = 0
             class_dice = {}
-            for c in range(1, num_classes):  # Skip background
-                class_valid = valid_mask[:, c-1]  # Adjust index since we removed background
-                if class_valid.sum() > 0:
-                    class_dice[c] = (dice_per_class[:, c-1] * class_valid.float()).sum() / class_valid.sum()
-                else:
-                    class_dice[c] = torch.tensor(0.0, device=pred.device)
+            
+            # Loop through all classes except background
+            for cls in range(1, num_classes):  # Skip background (index 0)
+                # Check if this class exists in the batch
+                has_class = (label == cls).sum() > 0
+                
+                if has_class:
+                    pred_cls = pred_softmax[:, cls]
+                    target_cls = target_one_hot[:, cls]
                     
+                    intersection = (pred_cls * target_cls).sum()
+                    denominator = pred_cls.sum() + target_cls.sum()
+                    
+                    # Calculate Dice for this class
+                    dice_cls = (2. * intersection + self.smooth) / (denominator + self.smooth)
+                    
+                    # Store class dice and update sum
+                    class_dice[cls] = dice_cls
+                    dice_sum += dice_cls
+                    num_fg_classes += 1
+            
+            # Calculate mean dice over foreground classes
+            if num_fg_classes > 0:
+                dice_mean = dice_sum / num_fg_classes
+            else:
+                # If no foreground classes in batch, set to 0
+                dice_mean = torch.tensor(0.0, device=pred.device)
+                
             return dice_mean, class_dice
         else:
-            # Return mean over all classes including background
-            return dice_per_class.mean(), {c: dice_per_class[:, c].mean() for c in range(num_classes)}
+            # Calculate for all classes including background
+            dice_per_class = {}
+            dice_sum = 0.0
+            
+            for cls in range(num_classes):
+                pred_cls = pred_softmax[:, cls]
+                target_cls = target_one_hot[:, cls]
+                
+                intersection = (pred_cls * target_cls).sum()
+                denominator = pred_cls.sum() + target_cls.sum()
+                
+                dice_cls = (2. * intersection + self.smooth) / (denominator + self.smooth)
+                dice_per_class[cls] = dice_cls
+                dice_sum += dice_cls
+                
+            dice_mean = dice_sum / num_classes
+            return dice_mean, dice_per_class
+
 
     def iou(self, pred, label, ignore_background=True):
         """

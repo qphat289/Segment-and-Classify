@@ -102,6 +102,7 @@ class ModelTrainer:
                     else:
                         value = metric_fn(cls_outputs, labels).item()
                     running_metrics[name] += value
+
                 
                 # Calculate averages
                 avg_metrics = {
@@ -183,9 +184,6 @@ class ModelTrainer:
             
             # Generate and save training progress plot
             self._plot_training_progress()
-            # REMOVE THESE TWO LINES:
-            # plt.savefig(os.path.join(results_dir, 'training_progress.png'))
-            # plt.close()  # Close the plot to free memory
             
             # Load best model with error handling
             if os.path.exists(save_path):
@@ -292,20 +290,6 @@ class ModelTrainer:
             print(f"Error generating plot: {str(e)}")
             import traceback
             traceback.print_exc()
-
-
-    # def _check_early_stopping(self, current_score, save_path):
-    #     """
-    #     Check for early stopping and save best model
-    #     """
-    #     if current_score < self.best_score:
-    #         self.best_score = current_score
-    #         self.counter = 0
-    #         torch.save(self.model.state_dict(), save_path)
-    #         return False
-        
-    #     self.counter += 1
-    #     return self.counter >= self.patience
 
     def _check_early_stopping(self, current_dice, save_path):
         """
