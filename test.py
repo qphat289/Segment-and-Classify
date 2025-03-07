@@ -11,6 +11,8 @@ from skimage.measure import approximate_polygon
 from scipy.interpolate import splprep, splev
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
+from pathlib import Path
+import time
 
 def load_model(model_path, device):
     """Load model from checkpoint"""
@@ -82,28 +84,19 @@ def get_model_prediction(model, img, device):
     
     return seg_output_np, seg_pred, cls_pred, cls_probs
 
-def softmax(x, axis=0):
+def dice_coef_metric(pred_mask, gt_mask, smooth=1.0, ignore_background=True):
     """
-    Compute softmax values for the given array along specified axis
-    """
-    # Subtract max for numerical stability
-    e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
-    return e_x / np.sum(e_x, axis=axis, keepdims=True)
-
-def dice_coef_metric(pred_mask, gt_mask, cls_pred, smooth=1.0, ignore_background=True):
-    """
-    Calculate Dice coefficient between predicted and ground truth masks
-    for the predicted tumor class only, with option to ignore background
+    Calculate Dice coefficient between any tumor regions, regardless of class.
+    Ignores background (class 0) and treats all other classes as tumor tissue.
     
     Args:
-        pred_mask: Predicted segmentation mask with shape [H, W] containing class indices
-        gt_mask: Ground truth mask with shape [H, W] containing class indices
-        cls_pred: Predicted class (0: No Tumor, 1: Glioma, 2: Meningioma, 3: Pituitary)
-        smooth: Smoothing factor to prevent division by zero
-        ignore_background: If True, background (class 0) will be ignored in calculations
-    
+        pred_mask: Predicted segmentation mask (class indices)
+        gt_mask: Ground truth segmentation mask (class indices)
+        smooth: Smoothing factor to avoid division by zero
+        ignore_background: Whether to ignore background class (default: True)
+        
     Returns:
-        Dice coefficient for the predicted class
+        Dice coefficient score (float)
     """
     # Convert inputs to numpy arrays if they aren't already
     if isinstance(pred_mask, torch.Tensor):
@@ -111,89 +104,100 @@ def dice_coef_metric(pred_mask, gt_mask, cls_pred, smooth=1.0, ignore_background
     if isinstance(gt_mask, torch.Tensor):
         gt_mask = gt_mask.cpu().numpy()
     
-    # For "No Tumor" prediction (cls_pred = 0)
-    if cls_pred == 0:
-        if ignore_background:
-            # When ignoring background and prediction is "No Tumor",
-            # we check if ground truth has any foreground classes
-            has_foreground_in_gt = np.any(gt_mask > 0)
-            if not has_foreground_in_gt:
-                return 1.0  # Perfect match - neither has tumor
-            else:
-                return 0.0  # Ground truth has tumor but prediction doesn't
-        else:
-            # Original behavior when not ignoring background
-            if np.all(gt_mask == 0):
-                return 1.0  # Perfect match
-            else:
-                # Compare background regions
-                pred_bg = (pred_mask == 0)
-                gt_bg = (gt_mask == 0)
-                intersection = np.sum(pred_bg & gt_bg)
-                denominator = np.sum(pred_bg) + np.sum(gt_bg)
-                return (2. * intersection + smooth) / (denominator + smooth)
-    
-    # For tumor classes (cls_pred = 1, 2, or 3)
+    # Create binary masks for any tumor (any non-zero class)
+    if ignore_background:
+        pred_tumor = (pred_mask > 0)  # Any non-background class
+        gt_tumor = (gt_mask > 0)      # Any non-background class
     else:
-        # Create binary masks for predicted class
-        pred_c = (pred_mask == cls_pred)
-        gt_c = (gt_mask == cls_pred)
-        
-        # Calculate intersection and union
-        intersection = np.sum(pred_c & gt_c)
-        denominator = np.sum(pred_c) + np.sum(gt_c)
-        
-        # Calculate Dice
-        if denominator > 0:
-            return (2. * intersection + smooth) / (denominator + smooth)
-        else:
-            # If denominator is 0, it means either prediction or ground truth has no pixels
-            # for this class
-            if np.sum(gt_c) == 0:
-                # If ground truth doesn't have this class but prediction does
-                return 0.0
-            else:
-                # This case shouldn't happen (pred_c is empty but denominator is 0)
-                return 0.0
-
-def dice_coef_metric_agnostic(pred_mask, gt_mask, smooth=1.0):
-    """Calculate Dice coefficient between any tumor regions, regardless of class"""
-    # Convert inputs to numpy arrays if they aren't already
-    if isinstance(pred_mask, torch.Tensor):
-        pred_mask = pred_mask.cpu().numpy()
-    if isinstance(gt_mask, torch.Tensor):
-        gt_mask = gt_mask.cpu().numpy()
-    
-    # Create binary masks for any tumor (classes 1, 2, or 3)
-    pred_tumor = (pred_mask > 0)
-    gt_tumor = (gt_mask > 0)
+        # If not ignoring background, consider all pixels
+        pred_tumor = np.ones_like(pred_mask, dtype=bool)
+        gt_tumor = np.ones_like(gt_mask, dtype=bool)
     
     # Calculate intersection and union
     intersection = np.sum(pred_tumor & gt_tumor)
-    denominator = np.sum(pred_tumor) + np.sum(gt_tumor)
+    pred_area = np.sum(pred_tumor)
+    gt_area = np.sum(gt_tumor)
     
-    # Calculate Dice
-    if denominator > 0:
-        return (2. * intersection + smooth) / (denominator + smooth)
+    # Calculate Dice coefficient
+    denominator = pred_area + gt_area
+    
+    # Handle edge cases
+    if denominator == 0:
+        # Both prediction and ground truth have no foreground pixels
+        return 1.0
+    elif gt_area == 0:
+        # Ground truth has no foreground but prediction does
+        return 0.0
+    elif pred_area == 0:
+        # Prediction has no foreground but ground truth does
+        return 0.0
     else:
+        # Normal case
+        return (2. * intersection + smooth) / (denominator + smooth)
+
+def iou_metric(pred_mask, gt_mask, smooth=1.0, ignore_background=True):
+    """
+    Calculate IoU (Intersection over Union) for tumor regions
+    
+    Args:
+        pred_mask: Predicted segmentation mask
+        gt_mask: Ground truth mask
+        smooth: Smoothing factor to avoid division by zero
+        ignore_background: Whether to ignore background
+        
+    Returns:
+        IoU score
+    """
+    # Convert inputs to numpy arrays if needed
+    if isinstance(pred_mask, torch.Tensor):
+        pred_mask = pred_mask.cpu().numpy()
+    if isinstance(gt_mask, torch.Tensor):
+        gt_mask = gt_mask.cpu().numpy()
+    
+    # Create binary masks for any tumor
+    if ignore_background:
+        pred_tumor = (pred_mask > 0)
+        gt_tumor = (gt_mask > 0)
+    else:
+        pred_tumor = np.ones_like(pred_mask, dtype=bool)
+        gt_tumor = np.ones_like(gt_mask, dtype=bool)
+    
+    # Calculate intersection and union
+    intersection = np.sum(pred_tumor & gt_tumor)
+    union = np.sum(pred_tumor | gt_tumor)
+    
+    # Calculate IoU
+    if union == 0:
         return 1.0 if np.sum(gt_tumor) == 0 else 0.0
+    else:
+        return (intersection + smooth) / (union + smooth)
 
 def print_class_statistics(pred_mask, gt_mask):
     """Print statistics about class distribution in masks"""
+    class_names = ['No Tumor/Background', 'Glioma', 'Meningioma', 'Pituitary']
+    
     print("\nClass statistics:")
-    print("Class | GT pixels | Pred pixels | Overlap")
-    print("-" * 45)
+    print("| Class | Name | GT pixels | Pred pixels | Overlap | Dice |")
+    print("|-------|------|-----------|-------------|---------|------|")
     
     for c in range(4):  # Classes 0-3
         gt_c = (gt_mask == c)
         pred_c = (pred_mask == c)
         overlap = np.sum(gt_c & pred_c)
-        print(f"{c}     | {np.sum(gt_c):9d} | {np.sum(pred_c):10d} | {overlap:7d}")
+        
+        # Calculate per-class dice
+        denominator = np.sum(gt_c) + np.sum(pred_c)
+        if denominator > 0:
+            dice = (2.0 * overlap) / denominator
+        else:
+            dice = 1.0 if np.sum(gt_c) == 0 else 0.0
+        
+        print(f"| {c} | {class_names[c]} | {np.sum(gt_c):9d} | {np.sum(pred_c):11d} | {overlap:7d} | {dice:.4f} |")
     
     # Calculate total overlap
     total_overlap = np.sum(gt_mask == pred_mask)
     total_pixels = gt_mask.size
-    print(f"\nTotal pixel accuracy: {total_overlap / total_pixels:.4f}")
+    print(f"\nPixel Accuracy: {total_overlap / total_pixels:.4f}")
 
 def smooth_contour(contour, tolerance=1.0, smoothing=True):
     """Simplify and smooth contours using spline interpolation"""
@@ -225,106 +229,101 @@ def smooth_contour(contour, tolerance=1.0, smoothing=True):
     else:
         return simplified
 
-def plot_mask_and_contours(img_np, mask, color, sigma=0.2, threshold=0.7, 
-                          tolerance=0.1, opacity=0.2, line_alpha=0.4):
-    """Plot mask overlay and contour for a single mask"""
-    # Clean up mask before finding contours
-    cleaned_mask = binary_closing(binary_opening(mask, iterations=1), iterations=1)
-    
-    # Add filled overlay with low opacity
-    overlay = np.zeros((*img_np.shape, 4))
-    overlay[cleaned_mask] = [*color, opacity]  # Color with specified opacity
-    plt.imshow(overlay)
-    
-    # Smooth mask for contours
-    smoothed_mask = gaussian_filter(cleaned_mask.astype(float), sigma=sigma)
-    
-    # Add smoothed contour lines
-    contours = measure.find_contours(smoothed_mask, threshold)
-    for contour in contours:
-        if len(contour) > 5:  # Only process contours with enough points
-            smoothed = smooth_contour(contour, tolerance=tolerance, smoothing=True)
-            plt.plot(smoothed[:, 1], smoothed[:, 0], color=color, linestyle='--', 
-                     dashes=(5, 2), linewidth=1, alpha=line_alpha)
-
-def create_visualization(img_np, gt_mask_np, seg_pred, cls_pred, cls_probs, avg_dice, class_agnostic_dice, output_dir):
-    """Create and save visualization of results"""
+def create_combined_visualization(img_np, gt_mask_np, seg_pred, cls_pred, cls_probs, 
+                                 dice_score, iou_score, output_dir, filename_base):
+    """
+    Create visualization showing both ground truth and prediction on the same image
+    with both Dice and IoU metrics, and colored insight zones
+    """
     # Define class names
     class_names = ['No Tumor', 'Glioma', 'Meningioma', 'Pituitary']
     
-    # Create visualization
-    plt.figure(figsize=(12, 10))
+    # Create figure
+    plt.figure(figsize=(10, 8))
     
     # Display original image
     plt.imshow(img_np, cmap='gray')
     
-    # Plot ground truth mask and contours
-    for i in range(1, 4):  # For each class (skipping background)
-        gt_mask_class = (gt_mask_np == i)
-        if np.any(gt_mask_class):
-            plot_mask_and_contours(
-                img_np, gt_mask_class, 
-                color=(0, 1, 1),  # Cyan
-                sigma=0.2, 
-                threshold=0.7,
-                tolerance=0.1, 
-                opacity=0.2, 
-                line_alpha=0.4
-            )
+    # Create binary masks
+    gt_tumor = gt_mask_np > 0
+    pred_tumor = seg_pred > 0
     
-    # Plot prediction mask and contours
-    for i in range(1, 4):  # For each class (skipping background)
-        pred_mask_class = (seg_pred == i)
-        if np.any(pred_mask_class):
-            plot_mask_and_contours(
-                img_np, pred_mask_class, 
-                color=(1, 0.5, 0),  # Orange
-                sigma=0.2, 
-                threshold=0.7,
-                tolerance=0.1, 
-                opacity=0.2, 
-                line_alpha=0.4
-            )
+    # Add colored insight zones with very low opacity
+    # Ground truth - cyan fill with very low opacity
+    if np.any(gt_tumor):
+        gt_overlay = np.zeros((*img_np.shape, 4))
+        gt_overlay[gt_tumor] = [0, 1, 1, 0.15]  # Cyan with very low opacity
+        plt.imshow(gt_overlay)
+    
+    # Prediction - orange fill with very low opacity
+    if np.any(pred_tumor):
+        pred_overlay = np.zeros((*img_np.shape, 4))
+        pred_overlay[pred_tumor] = [1, 0.5, 0, 0.15]  # Orange with very low opacity
+        plt.imshow(pred_overlay)
+    
+    # Plot ground truth contour - cyan dashed line
+    if np.any(gt_tumor):
+        contours = measure.find_contours(gt_tumor.astype(float), 0.5)
+        for contour in contours:
+            if len(contour) > 5:
+                smoothed = smooth_contour(contour, tolerance=0.1, smoothing=True)
+                plt.plot(smoothed[:, 1], smoothed[:, 0], color=(0, 1, 1), 
+                        linestyle='--', linewidth=2, alpha=0.8)
+    
+    # Plot prediction contour - orange solid line
+    if np.any(pred_tumor):
+        contours = measure.find_contours(pred_tumor.astype(float), 0.5)
+        for contour in contours:
+            if len(contour) > 5:
+                smoothed = smooth_contour(contour, tolerance=0.1, smoothing=True)
+                plt.plot(smoothed[:, 1], smoothed[:, 0], color=(1, 0.5, 0), 
+                        linewidth=2, alpha=0.8)
     
     # Add legend
     legend_elements = [
-        Patch(facecolor='cyan', alpha=0.5, label='Ground Truth (Fill)'),
-        Line2D([0], [0], color='cyan', linestyle='--', lw=1, alpha=0.9, label='Ground Truth (Contour)'),
-        Patch(facecolor='orange', alpha=0.5, label='Prediction (Fill)'),
-        Line2D([0], [0], color='orange', linestyle='--', lw=1, alpha=0.9, label='Prediction (Contour)')
+        Patch(facecolor=(0, 1, 1), alpha=0.3, label='Ground Truth'),
+        Patch(facecolor=(1, 0.5, 0), alpha=0.3, label='Prediction'),
+        Line2D([0], [0], color=(0, 1, 1), linestyle='--', lw=2, alpha=0.8, label='Ground Truth Contour'),
+        Line2D([0], [0], color=(1, 0.5, 0), lw=2, alpha=0.8, label='Prediction Contour')
     ]
-    plt.legend(handles=legend_elements, loc='upper right')
     
-    # Set title with dice and classification results
-    plt.title(f'Dice: {avg_dice:.4f} (Agnostic: {class_agnostic_dice:.4f}) | Class: {class_names[cls_pred]} ({cls_probs[cls_pred]*100:.1f}%)', 
-              fontsize=14)
+    plt.legend(handles=legend_elements, loc='upper right', fontsize=10)
+    
+    # Add metrics and prediction class
+    title = f"Dice: {dice_score:.4f} | IoU: {iou_score:.4f}\nPredicted: {class_names[cls_pred]} ({cls_probs[cls_pred]*100:.1f}%)"
+    plt.title(title, fontsize=14)
     
     plt.axis('off')
     
     # Save and show result
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'comparison_result.png'), dpi=300)
+    output_path = os.path.join(output_dir, f'{filename_base}_combined.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.show()
     
-    # Print results
-    print(f"Predicted class: {class_names[cls_pred]} ({cls_probs[cls_pred]*100:.1f}%)")
-    print(f"Class-specific Dice Score: {avg_dice:.4f}")
-    print(f"Class-agnostic Dice Score: {class_agnostic_dice:.4f}")
-    print(f"Result saved to: {os.path.join(output_dir, 'comparison_result.png')}")
+    # Return path for reference
+    return output_path
 
-def compare_prediction_with_gt(model_path, image_path, mask_path, device='cuda'):
+
+def compare_prediction_with_gt(model_path, image_path, mask_path, output_dir='results', device='cuda'):
     """
-    Compare model prediction with ground truth mask using different colors with reduced opacity
-    and smooth dashed contour lines
+    Compare model prediction with ground truth mask
     
     Args:
         model_path: Path to the saved model (.pt file)
         image_path: Path to the image to test
         mask_path: Path to the ground truth mask
+        output_dir: Directory to save results
         device: Device to run inference on
     """
     # Set device
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get filename for results
+    filename_base = Path(image_path).stem
     
     # Load model
     model = load_model(model_path, device)
@@ -336,34 +335,113 @@ def compare_prediction_with_gt(model_path, image_path, mask_path, device='cuda')
     seg_output_np, seg_pred, cls_pred, cls_probs = get_model_prediction(model, img, device)
     
     # Print unique values in masks to debug
-    print("Ground truth classes present:", np.unique(gt_mask_np))
-    print("Predicted classes present:", np.unique(seg_pred))
+    print("\nImage Information:")
+    print(f"Image: {image_path}")
+    print(f"Ground truth classes present: {np.unique(gt_mask_np)}")
+    print(f"Predicted classes present: {np.unique(seg_pred)}")
     
     # Print detailed class statistics
     print_class_statistics(seg_pred, gt_mask_np)
     
-    # Calculate Dice scores
-    class_specific_dice = dice_coef_metric(seg_pred, gt_mask_np, cls_pred)
-    class_agnostic_dice = dice_coef_metric_agnostic(seg_pred, gt_mask_np)
+    # Calculate metrics
+    dice_score = dice_coef_metric(seg_pred, gt_mask_np)
+    iou_score = iou_metric(seg_pred, gt_mask_np)
     
-    print(f"Class-specific Dice: {class_specific_dice:.4f}")
-    print(f"Class-agnostic Dice: {class_agnostic_dice:.4f}")
-    
-    # Create output directory
-    output_dir = 'results'
-    os.makedirs(output_dir, exist_ok=True)
+    print(f"\nDice Score: {dice_score:.4f}")
+    print(f"IoU Score: {iou_score:.4f}")
     
     # Create visualization
-    create_visualization(img_np, gt_mask_np, seg_pred, cls_pred, cls_probs, class_specific_dice, class_agnostic_dice, output_dir)
+    output_path = create_combined_visualization(
+        img_np, gt_mask_np, seg_pred, cls_pred, cls_probs, 
+        dice_score, iou_score, output_dir, filename_base
+    )
     
-    # Print additional information for No Tumor cases
-    if np.all(gt_mask_np == 0):
-        print("This is a 'No Tumor' image.")
-        non_bg_pixels = np.sum(seg_pred > 0)
-        total_pixels = seg_pred.size
-        print(f"Percentage of pixels predicted as tumor: {non_bg_pixels/total_pixels*100:.2f}%")
-        if class_specific_dice == 1.0:
-            print("Perfect score! Model correctly predicted 'No Tumor' with minimal false positives.")
+    # Print classification confidence
+    class_names = ['No Tumor', 'Glioma', 'Meningioma', 'Pituitary']
+    print("\nClassification Confidence:")
+    for i, cls_name in enumerate(class_names):
+        print(f"{cls_name}: {cls_probs[i]*100:.2f}%")
+    
+    print(f"\nResult saved to: {output_path}")
+    
+    # Return metrics for batch processing
+    return {
+        'filename': filename_base,
+        'dice': dice_score,
+        'iou': iou_score,
+        'predicted_class': cls_pred,
+        'true_classes': list(np.unique(gt_mask_np)),
+        'class_confidence': cls_probs[cls_pred]
+    }
+
+def batch_process(model_path, test_dir, output_dir='batch_results', device='cuda'):
+    """
+    Process multiple test images and compile results
+    
+    Args:
+        model_path: Path to model
+        test_dir: Directory containing test images and masks
+        output_dir: Directory to save results
+        device: Device to run inference on
+    """
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Find all image files
+    image_files = [f for f in os.listdir(test_dir) if f.endswith('.jpg') or f.endswith('.jpeg') or f.endswith('.png')]
+    
+    # Track results
+    results = []
+    
+    for img_file in image_files:
+        img_path = os.path.join(test_dir, img_file)
+        
+        # Find corresponding mask (assuming same name with .png extension)
+        mask_name = os.path.splitext(img_file)[0] + '.png'
+        mask_path = os.path.join(test_dir, mask_name)
+        
+        if not os.path.exists(mask_path):
+            print(f"Warning: No mask found for {img_file}, skipping.")
+            continue
+        
+        print(f"\nProcessing: {img_file}")
+        try:
+            # Process single image
+            result = compare_prediction_with_gt(model_path, img_path, mask_path, output_dir, device)
+            results.append(result)
+        except Exception as e:
+            print(f"Error processing {img_file}: {str(e)}")
+    
+    # Compile summary statistics
+    if results:
+        avg_dice = np.mean([r['dice'] for r in results])
+        avg_iou = np.mean([r['iou'] for r in results])
+        
+        print("\nBatch Processing Summary:")
+        print(f"Images processed: {len(results)}")
+        print(f"Average Dice: {avg_dice:.4f}")
+        print(f"Average IoU: {avg_iou:.4f}")
+        
+        # Save summary to CSV
+        import csv
+        csv_path = os.path.join(output_dir, 'results_summary.csv')
+        with open(csv_path, 'w', newline='') as csvfile:
+            fieldnames = ['filename', 'dice', 'iou', 'predicted_class', 'class_confidence']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for r in results:
+                writer.writerow({
+                    'filename': r['filename'],
+                    'dice': r['dice'],
+                    'iou': r['iou'],
+                    'predicted_class': r['predicted_class'],
+                    'class_confidence': r['class_confidence']
+                })
+        
+        print(f"Results summary saved to: {csv_path}")
+    else:
+        print("No images were successfully processed.")
 
 
 if __name__ == "__main__":
@@ -371,8 +449,11 @@ if __name__ == "__main__":
     model_path = r"D:/best_model.pt"
     
     # Path to test image and ground truth mask
-    image_path = "test/2.jpg"
-    mask_path = "test/2.png"
+    image_path = "test/pitu.jpg"
+    mask_path = "test/pitu.png"
     
-    # Run comparison
+    # For single image testing
     compare_prediction_with_gt(model_path, image_path, mask_path)
+    
+    # For batch processing (uncomment to use)
+    # batch_process(model_path, "test_dataset")
