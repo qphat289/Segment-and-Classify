@@ -368,7 +368,7 @@ def compare_prediction_with_gt(model_path, image_path, mask_path, device='cuda')
 
 if __name__ == "__main__":
     # Path to your trained model
-    model_path = "checkpoint_ori/best_model.pt"
+    model_path = r"D:/best_model.pt"
     
     # Path to test image and ground truth mask
     image_path = "test/2.jpg"

@@ -35,7 +35,7 @@ class ModelTrainer:
 
         # Early stopping parameters
         self.patience = patience
-        self.best_score = float('inf')
+        self.best_score = float('-inf')
         self.counter = 0
 
         # Training history tracking
@@ -159,8 +159,6 @@ class ModelTrainer:
         os.makedirs(results_dir, exist_ok=True)
         
         # Initialize best_score for dice (higher is better)
-        self.best_score = float('-inf')
-
         try:
             for epoch in range(num_epochs):
                 print(f"\nEpoch {epoch+1}/{num_epochs}")
