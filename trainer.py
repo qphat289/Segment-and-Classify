@@ -103,7 +103,6 @@ class ModelTrainer:
                         value = metric_fn(cls_outputs, labels).item()
                     running_metrics[name] += value
 
-                
                 # Calculate averages
                 avg_metrics = {
                     'loss': running_loss['total'] / (batch_idx + 1),
@@ -140,10 +139,10 @@ class ModelTrainer:
         # Print validation metrics with more decimal places
         if phase == 'val':
             print(
-                f"- val_accuracy: {epoch_metrics.get('cls_accuracy', 0):.4f} - "
-                f"val_loss: {epoch_metrics['loss_total']:.4f} - "
-                f"val_dice: {epoch_metrics.get('seg_dice', 0):.4f} - "
-                f"val_iou: {epoch_metrics.get('seg_iou', 0):.4f}"
+                f"- val_accuracy: {epoch_metrics.get('cls_accuracy', 0):.6f} - "
+                f"val_loss: {epoch_metrics['loss_total']:.6f} - "
+                f"val_dice: {epoch_metrics.get('seg_dice', 0):.6f} - "
+                f"val_iou: {epoch_metrics.get('seg_iou', 0):.6f}"
             )
         
         return epoch_metrics

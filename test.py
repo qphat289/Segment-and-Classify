@@ -90,16 +90,17 @@ def softmax(x, axis=0):
     e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
     return e_x / np.sum(e_x, axis=axis, keepdims=True)
 
-def dice_coef_metric(pred_mask, gt_mask, cls_pred, smooth=1.0):
+def dice_coef_metric(pred_mask, gt_mask, cls_pred, smooth=1.0, ignore_background=True):
     """
     Calculate Dice coefficient between predicted and ground truth masks
-    for the predicted tumor class only
+    for the predicted tumor class only, with option to ignore background
     
     Args:
         pred_mask: Predicted segmentation mask with shape [H, W] containing class indices
         gt_mask: Ground truth mask with shape [H, W] containing class indices
         cls_pred: Predicted class (0: No Tumor, 1: Glioma, 2: Meningioma, 3: Pituitary)
         smooth: Smoothing factor to prevent division by zero
+        ignore_background: If True, background (class 0) will be ignored in calculations
     
     Returns:
         Dice coefficient for the predicted class
@@ -112,16 +113,25 @@ def dice_coef_metric(pred_mask, gt_mask, cls_pred, smooth=1.0):
     
     # For "No Tumor" prediction (cls_pred = 0)
     if cls_pred == 0:
-        # Check if ground truth is also "No Tumor"
-        if np.all(gt_mask == 0):
-            return 1.0  # Perfect match
+        if ignore_background:
+            # When ignoring background and prediction is "No Tumor",
+            # we check if ground truth has any foreground classes
+            has_foreground_in_gt = np.any(gt_mask > 0)
+            if not has_foreground_in_gt:
+                return 1.0  # Perfect match - neither has tumor
+            else:
+                return 0.0  # Ground truth has tumor but prediction doesn't
         else:
-            # Compare background regions
-            pred_bg = (pred_mask == 0)
-            gt_bg = (gt_mask == 0)
-            intersection = np.sum(pred_bg & gt_bg)
-            denominator = np.sum(pred_bg) + np.sum(gt_bg)
-            return (2. * intersection + smooth) / (denominator + smooth)
+            # Original behavior when not ignoring background
+            if np.all(gt_mask == 0):
+                return 1.0  # Perfect match
+            else:
+                # Compare background regions
+                pred_bg = (pred_mask == 0)
+                gt_bg = (gt_mask == 0)
+                intersection = np.sum(pred_bg & gt_bg)
+                denominator = np.sum(pred_bg) + np.sum(gt_bg)
+                return (2. * intersection + smooth) / (denominator + smooth)
     
     # For tumor classes (cls_pred = 1, 2, or 3)
     else:
@@ -358,7 +368,7 @@ def compare_prediction_with_gt(model_path, image_path, mask_path, device='cuda')
 
 if __name__ == "__main__":
     # Path to your trained model
-    model_path = "checkpoint_new/best_model.pt"
+    model_path = "checkpoint_ori/best_model.pt"
     
     # Path to test image and ground truth mask
     image_path = "test/2.jpg"

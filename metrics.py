@@ -98,10 +98,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class SegmentationMetrics:
-    def __init__(self, smooth=1.0, threshold=0.5, background_idx=0):
+    def __init__(self, smooth=1.0):
         self.smooth = smooth
-        self.threshold = threshold
-        self.background_idx = background_idx
 
     def dice_coef_metric(self, pred, label, ignore_background=True):
         """
@@ -238,40 +236,44 @@ class ClassificationMetrics:
             f1_scores.append(f1)
         
         return torch.stack(f1_scores).mean()
-
+    
 class DualTaskLoss(nn.Module):
-    def __init__(self, seg_weight=1.0, cls_weight=1.0, background_idx=0):
+    def __init__(self, seg_weight=1.0, cls_weight=1.0, smooth=1.0):
         super(DualTaskLoss, self).__init__()
         self.seg_weight = seg_weight
         self.cls_weight = cls_weight
-        self.background_idx = background_idx
+        self.smooth = smooth
         self.cls_criterion = nn.CrossEntropyLoss()
         self.seg_criterion = self.dice_loss_ignore_background
         
-    def dice_loss_ignore_background(self, pred, target):
+    def dice_loss_ignore_background(self, pred, label):
         """
-        Dice loss that ignores background class
+        Calculate Dice loss with background class ignored
         
         Args:
             pred: [B, C, H, W] - prediction logits
-            target: [B, H, W] - ground truth labels
+            label: [B, H, W] - ground truth labels
+        
+        Returns:
+            loss: scalar loss value (1 - Dice coefficient)
         """
         # Convert to probabilities
         pred_softmax = torch.softmax(pred, dim=1)
         
         # One-hot encode target
         target_one_hot = torch.zeros_like(pred_softmax)
-        target_one_hot.scatter_(1, target.unsqueeze(1), 1)
+        target_one_hot.scatter_(1, label.unsqueeze(1), 1)
         
-        # Calculate Dice Loss for each class separately
         batch_size, num_classes = pred.shape[0], pred.shape[1]
-        dice_loss = 0
-        num_fg_classes = 0  # Counter for foreground classes
+        
+        # Initialize variables for tracking
+        dice_sum = 0.0
+        num_fg_classes = 0
         
         # Loop through all classes except background
         for cls in range(1, num_classes):  # Skip background (index 0)
             # Check if this class exists in the batch
-            has_class = (target == cls).sum() > 0
+            has_class = (label == cls).sum() > 0
             
             if has_class:
                 pred_cls = pred_softmax[:, cls]
@@ -281,26 +283,45 @@ class DualTaskLoss(nn.Module):
                 denominator = pred_cls.sum() + target_cls.sum()
                 
                 # Calculate Dice for this class
-                dice_cls = (2. * intersection + 1e-6) / (denominator + 1e-6)
-                dice_loss += (1 - dice_cls)
+                dice_cls = (2. * intersection + self.smooth) / (denominator + self.smooth)
+                
+                # Update sum and count
+                dice_sum += dice_cls
                 num_fg_classes += 1
         
-        # Average Dice loss over foreground classes
+        # Calculate mean dice over foreground classes
         if num_fg_classes > 0:
-            dice_loss = dice_loss / num_fg_classes
+            dice_mean = dice_sum / num_fg_classes
         else:
-            # If no foreground classes in batch, set loss to 0
-            dice_loss = torch.tensor(0.0, device=pred.device)
+            # If no foreground classes in batch, set to 0
+            dice_mean = torch.tensor(0.0, device=pred.device, requires_grad=True)
             
-        return dice_loss
+        # Return 1 - dice_mean as the loss
+        return 1.0 - dice_mean
 
     def forward(self, seg_pred, seg_target, cls_pred, cls_target):
+        """
+        Calculate combined loss for segmentation and classification
+        
+        Args:
+            seg_pred: [B, C, H, W] - segmentation prediction logits
+            seg_target: [B, H, W] - segmentation ground truth labels
+            cls_pred: [B, C] - classification prediction logits
+            cls_target: [B] - classification ground truth labels
+            
+        Returns:
+            loss: combined weighted loss
+        """
         seg_loss = self.dice_loss_ignore_background(seg_pred, seg_target)
         cls_loss = self.cls_criterion(cls_pred, cls_target)
-        return self.seg_weight * seg_loss + self.cls_weight * cls_loss
+        
+        # Combine losses with weights
+        total_loss = self.seg_weight * seg_loss + self.cls_weight * cls_loss
+        
+        return total_loss
 
-def create_metrics(background_idx=0):
-    seg_metrics = SegmentationMetrics(background_idx=background_idx)
+def create_metrics():
+    seg_metrics = SegmentationMetrics()
     cls_metrics = ClassificationMetrics()
 
     metrics = {
