@@ -1,4 +1,4 @@
-# Segment-and-Classify-
+# Segment-and-Classify-Brain_tumor
 
 0 (No Tumor, 1595 images),
 1 (Glioma, 649 images),
