@@ -5,18 +5,6 @@ class SegmentationMetrics:
     def __init__(self, smooth=0.4):
         self.smooth = smooth
 
-    # def dice_coef_metric(self, pred, label):
-    #     # pred shape: [B, C, H, W], label shape: [B, H, W]
-    #     pred = torch.softmax(pred, dim=1)  # Convert logits to probabilities
-    #     label_one_hot = torch.zeros_like(pred)  # Create one-hot encoded labels
-    #     label_one_hot.scatter_(1, label.unsqueeze(1), 1)  # Convert to one-hot encoding
-        
-    #     intersection = (pred * label_one_hot).sum(dim=(2, 3))  # Calculate intersection
-    #     denominator = pred.sum(dim=(2, 3)) + label_one_hot.sum(dim=(2, 3))  # Calculate denominator
-    #     dice = (2. * intersection + self.smooth) / (denominator + self.smooth)  # Calculate Dice coefficient
-        
-    #     return dice.mean()  # Average over batch and classes
-
     def dice_coef_metric(self, pred, label, ignore_background=True):
         # pred shape: [B, C, H, W], label shape: [B, H, W]
         pred = torch.softmax(pred, dim=1)  # Convert logits to probabilities
